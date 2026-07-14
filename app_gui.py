@@ -219,7 +219,7 @@ class ObjectDetectionApp(ctk.CTk):
         # ── Model info ────────────────────────────────────────────────────────
         ctk.CTkLabel(
             cframe,
-            text="Model    :  YOLO26s\nCamera  :  640 px (fast)\nImg/Vid  :  1280 px\nClasses  :  80 (COCO)",
+            text="Model    :  YOLOv8n\nCamera  :  640 px (fast)\nImg/Vid  :  1280 px\nClasses  :  80 (COCO)",
             font=_F_SMALL, text_color=_MUTED, justify="left",
         ).pack(anchor="w", padx=18, pady=(10, 0))
 
@@ -236,7 +236,7 @@ class ObjectDetectionApp(ctk.CTk):
                                          font=_F_SMALL, text_color=_MUTED)
         self._status_lbl.pack(side="left")
 
-        ctk.CTkLabel(bar, text="Fatima · RIMS Internship 2026",
+        ctk.CTkLabel(bar, text="Fatima ",
                       font=_F_SMALL, text_color="#2d3748").pack(side="right", padx=16)
 
     # ──────────────────────────── source controls ────────────────────────────

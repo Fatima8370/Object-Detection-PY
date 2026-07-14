@@ -99,10 +99,8 @@ class _CaptureThread(threading.Thread):
 
 class DetectionWorker(threading.Thread):
 
-    # YOLO26s — latest Ultralytics model (Jan 2026)
-    # Better small-object accuracy thanks to STAL + Progressive Loss
-    # NMS-free inference → lower latency, simpler deployment
-    MODEL_PATH = "yolo26s.pt"
+    # YOLOv8 Nano — 3.2M params, optimized for real-time on standard hardware
+    MODEL_PATH = "yolov8n.pt"
 
     def __init__(self, frame_queue: queue.Queue, status_callback,
                  fps_callback, mode: str = MODE_CAMERA, source=None):
