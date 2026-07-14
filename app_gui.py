@@ -219,7 +219,7 @@ class ObjectDetectionApp(ctk.CTk):
         # ── Model info ────────────────────────────────────────────────────────
         ctk.CTkLabel(
             cframe,
-            text="Model    :  YOLOv8s\nCamera  :  640 px (fast)\nImg/Vid  :  1280 px\nSmall obj :  ✓ enhanced",
+            text="Model    :  YOLO26s\nCamera  :  640 px (fast)\nImg/Vid  :  1280 px\nClasses  :  80 (COCO)",
             font=_F_SMALL, text_color=_MUTED, justify="left",
         ).pack(anchor="w", padx=18, pady=(10, 0))
 

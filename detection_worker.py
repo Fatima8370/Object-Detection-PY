@@ -1,20 +1,25 @@
 """
-detection_worker.py  (v3)
+detection_worker.py  (v4)
 -------------------------
-Key improvements over v2:
+Model: YOLO26s (Ultralytics, Jan 2026)
+  • NMS-free end-to-end inference → simpler pipeline, lower latency
+  • STAL label assignment + Progressive Loss → much better small-object recall
+  • ~43% faster CPU inference vs YOLO11n
 
-CAMERA LAG FIX
-  A dedicated CaptureThread reads frames from the webcam as fast as possible
-  into a single-slot queue. The inference loop always grabs the LATEST frame,
-  so stale frames are dropped before they ever touch the model.
-  Camera mode also uses imgsz=640 (fast) while image/video use imgsz=1280
-  (quality) — this alone cuts per-frame latency by ~4× on CPU.
+Camera lag fix:
+  CaptureThread reads at full webcam speed into a 1-slot queue.
+  Inference loop always gets the freshest frame (stale frames discarded).
+  Camera uses imgsz=640 (fast); image/video use imgsz=1280 (quality).
 
-DYNAMIC CONFIDENCE FOR IMAGES & VIDEOS
-  Raw YOLO results are cached after the first inference pass.
-  When the GUI slider moves (set_conf) or the greyscale switch flips,
-  a _rerender flag is set. The display loop re-renders from the cached
-  results without running the model again — instant response.
+Dynamic confidence:
+  Raw YOLO results cached. Slider/toggle changes trigger re-render from
+  cache without re-running the model → instant visual update.
+
+IMPORTANT — COCO-80 class limitation:
+  All YOLO models (including YOLO26) are trained on the COCO dataset which
+  contains exactly 80 object classes. Objects NOT in COCO — such as
+  eyeglasses, calculators, trees, pens — will NEVER be detected regardless
+  of confidence threshold. See the full class list printed at startup.
 """
 
 import threading
@@ -94,7 +99,10 @@ class _CaptureThread(threading.Thread):
 
 class DetectionWorker(threading.Thread):
 
-    MODEL_PATH = "yolov8s.pt"
+    # YOLO26s — latest Ultralytics model (Jan 2026)
+    # Better small-object accuracy thanks to STAL + Progressive Loss
+    # NMS-free inference → lower latency, simpler deployment
+    MODEL_PATH = "yolo26s.pt"
 
     def __init__(self, frame_queue: queue.Queue, status_callback,
                  fps_callback, mode: str = MODE_CAMERA, source=None):
@@ -246,8 +254,8 @@ class DetectionWorker(threading.Thread):
         label = "Camera" if self._mode == MODE_CAMERA else "Video"
         src   = 0 if self._mode == MODE_CAMERA else self._source
 
-        # Use imgsz=640 for real-time streams — much faster on CPU
-        # (yolov8s at 640 still outperforms yolo11n at 640 for small objects)
+        # yolo26s at 640 is ~43% faster than yolo11n on CPU
+        # while maintaining better small-object accuracy
         INFER_SZ = 640
 
         raw_slot      = queue.Queue(maxsize=1)     # capture → inference
