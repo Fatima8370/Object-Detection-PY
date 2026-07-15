@@ -100,7 +100,7 @@ class _CaptureThread(threading.Thread):
 class DetectionWorker(threading.Thread):
 
     # YOLOv8 Nano — 3.2M params, optimized for real-time on standard hardware
-    MODEL_PATH = "yolov8n.pt"
+    MODEL_PATH = "best.pt"
 
     def __init__(self, frame_queue: queue.Queue, status_callback,
                  fps_callback, mode: str = MODE_CAMERA, source=None):
