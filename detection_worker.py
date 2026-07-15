@@ -250,7 +250,7 @@ class DetectionWorker(threading.Thread):
           inference loop never processes a stale frame — lag eliminated.
         """
         label = "Camera" if self._mode == MODE_CAMERA else "Video"
-        src   = 0 if self._mode == MODE_CAMERA else self._source
+        src   = 1 if self._mode == MODE_CAMERA else self._source
 
         # yolo26s at 640 is ~43% faster than yolo11n on CPU
         # while maintaining better small-object accuracy
