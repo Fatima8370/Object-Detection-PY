@@ -182,7 +182,7 @@ class ObjectDetectionApp(ctk.CTk):
         self._conf_lbl.pack()
 
         self._slider = ctk.CTkSlider(
-            cframe, from_=0.10, to=1.00, number_of_steps=90,
+            cframe, from_=0.01, to=1.00, number_of_steps=90,
             command=self._on_slider,
             button_color=_ACCENT, progress_color=_ACCENT2,
         )

@@ -114,7 +114,7 @@ class DetectionWorker(threading.Thread):
 
         self._lock        = threading.Lock()
         self._running     = False
-        self._conf        = 0.30
+        self._conf        = 0.10
         self._greyscale   = True
         # flag: re-render cached results without re-running YOLO
         self._rerender    = False
@@ -220,7 +220,7 @@ class DetectionWorker(threading.Thread):
             self._rerender = False
 
         # Run inference ONCE at high resolution
-        results = model(frame, imgsz=1280, verbose=False)
+        results = model(frame, imgsz=640, verbose=False)
         annotated = self._render(frame, results, conf, grey)
         self._push(annotated)
 
@@ -262,7 +262,7 @@ class DetectionWorker(threading.Thread):
 
         # Wait up to 2 s for the first frame to confirm camera opened
         try:
-            _ = raw_slot.get(timeout=2.0)
+            _ = raw_slot.get(timeout=3.0)
             raw_slot.put_nowait(_)
         except queue.Empty:
             self._status_cb(f"{label} error: no frames received")
