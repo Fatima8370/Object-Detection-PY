@@ -95,12 +95,11 @@ class _CaptureThread(threading.Thread):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main detection worker
-# ─────────────────────────────────────────────────────────────────────────────
-
+#
 class DetectionWorker(threading.Thread):
 
     # YOLOv8 Nano — 3.2M params, optimized for real-time on standard hardware
-    MODEL_PATH = "best.pt"
+    MODEL_PATH = "yolov8n.pt"
 
     def __init__(self, frame_queue: queue.Queue, status_callback,
                  fps_callback, mode: str = MODE_CAMERA, source=None):
@@ -250,7 +249,7 @@ class DetectionWorker(threading.Thread):
           inference loop never processes a stale frame — lag eliminated.
         """
         label = "Camera" if self._mode == MODE_CAMERA else "Video"
-        src   = 1 if self._mode == MODE_CAMERA else self._source
+        src   = 0 if self._mode == MODE_CAMERA else self._source
 
         # yolo26s at 640 is ~43% faster than yolo11n on CPU
         # while maintaining better small-object accuracy
