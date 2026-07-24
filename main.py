@@ -1,22 +1,10 @@
 """
 main.py
 -------
-Entry point for the Real-Time Object Detection application.
-
-Run:
-    python main.py
-
-Dependencies (install once):
-    pip install ultralytics opencv-python customtkinter Pillow numpy
+Main entry point delegating to app.py
 """
 
-from app_gui import ObjectDetectionApp
-
-
-def main():
-    app = ObjectDetectionApp()
-    app.mainloop()
-
+from app import main
 
 if __name__ == "__main__":
     main()
