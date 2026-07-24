@@ -1,31 +1,18 @@
 """
-detection_worker.py  (v4)
--------------------------
-Model: YOLO26s (Ultralytics, Jan 2026)
-  • NMS-free end-to-end inference → simpler pipeline, lower latency
-  • STAL label assignment + Progressive Loss → much better small-object recall
-  • ~43% faster CPU inference vs YOLO11n
-
-Camera lag fix:
-  CaptureThread reads at full webcam speed into a 1-slot queue.
-  Inference loop always gets the freshest frame (stale frames discarded).
-  Camera uses imgsz=640 (fast); image/video use imgsz=1280 (quality).
-
-Dynamic confidence:
-  Raw YOLO results cached. Slider/toggle changes trigger re-render from
-  cache without re-running the model → instant visual update.
-
-IMPORTANT — COCO-80 class limitation:
-  All YOLO models (including YOLO26) are trained on the COCO dataset which
-  contains exactly 80 object classes. Objects NOT in COCO — such as
-  eyeglasses, calculators, trees, pens — will NEVER be detected regardless
-  of confidence threshold. See the full class list printed at startup.
+detection_worker.py  (v5 - LRF & Model Switching)
+-------------------------------------------------
+Features:
+  - Multi-threaded background worker for YOLO Object Detection.
+  - Dynamic model reloading at runtime (e.g. switching between yolov8n.pt and best.pt).
+  - Boresight Crosshair Overlay: Renders fixed reticle at frame center (w//2, h//2).
+  - Laser Range Finder (LRF) Distance Overlay: Displays live distance measurement
+    on the reticle HUD and attaches distance metadata to targeted objects.
+  - Lag-free CaptureThread: Single-slot raw frame queue for zero camera stream delay.
 """
 
 import threading
 import queue
 import time
-
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -45,22 +32,11 @@ MODE_IMAGE  = "image"
 MODE_VIDEO  = "video"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Lightweight capture thread — only reads pixels, never runs inference
-# ─────────────────────────────────────────────────────────────────────────────
-
 class _CaptureThread(threading.Thread):
-    """
-    Reads frames from a cv2.VideoCapture as fast as the camera allows and
-    drops everything except the very latest frame into a maxsize-1 slot queue.
-    The inference loop in DetectionWorker reads from this queue, so it always
-    gets the freshest frame and never waits behind stale ones.
-    """
-
     def __init__(self, source, slot: queue.Queue):
         super().__init__(daemon=True)
-        self._source = source           # 0 for webcam, path for video file
-        self._slot   = slot             # maxsize=1
+        self._source = source
+        self._slot   = slot
         self._stop   = threading.Event()
 
     def halt(self):
@@ -74,14 +50,13 @@ class _CaptureThread(threading.Thread):
         while not self._stop.is_set():
             ret, frame = cap.read()
             if not ret:
-                if isinstance(self._source, str):   # video file: loop
+                if isinstance(self._source, str):
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 break
 
-            # Replace any unread frame — the inference loop will pick this up
             try:
-                self._slot.get_nowait()             # discard old frame
+                self._slot.get_nowait()
             except queue.Empty:
                 pass
             try:
@@ -90,19 +65,12 @@ class _CaptureThread(threading.Thread):
                 pass
 
         cap.release()
-        self._cap_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main detection worker
-#
 class DetectionWorker(threading.Thread):
-
-    # YOLOv8 Nano — 3.2M params, optimized for real-time on standard hardware
-    MODEL_PATH = "yolov8n.pt"
-
     def __init__(self, frame_queue: queue.Queue, status_callback,
-                 fps_callback, mode: str = MODE_CAMERA, source=None):
+                 fps_callback, mode: str = MODE_CAMERA, source=None,
+                 model_path: str = "yolov8n.pt"):
         super().__init__(daemon=True)
 
         self.frame_queue  = frame_queue
@@ -110,15 +78,15 @@ class DetectionWorker(threading.Thread):
         self._fps_cb      = fps_callback
         self._mode        = mode
         self._source      = source
+        self._model_path  = model_path
 
         self._lock        = threading.Lock()
         self._running     = False
         self._conf        = 0.10
         self._greyscale   = True
-        # flag: re-render cached results without re-running YOLO
         self._rerender    = False
-
-    # ── public API (all thread-safe) ─────────────────────────────────────────
+        self._reload_model = False
+        self._lrf_distance_str = "--- m"
 
     @property
     def running(self) -> bool:
@@ -132,47 +100,91 @@ class DetectionWorker(threading.Thread):
     def set_conf(self, value: float):
         with self._lock:
             self._conf     = float(value)
-            self._rerender = True   # trigger re-render from cache
+            self._rerender = True
 
     def set_greyscale(self, value: bool):
         with self._lock:
             self._greyscale = bool(value)
-            self._rerender  = True  # trigger re-render from cache
+            self._rerender  = True
 
-    # ── rendering ─────────────────────────────────────────────────────────────
+    def set_model_path(self, model_path: str):
+        with self._lock:
+            if self._model_path != model_path:
+                self._model_path = model_path
+                self._reload_model = True
+                self._rerender = True
+
+    def set_lrf_distance(self, distance_str: str):
+        with self._lock:
+            self._lrf_distance_str = distance_str
+            self._rerender = True
 
     def _render(self, frame_bgr: np.ndarray, results,
-                conf_thresh: float, apply_grey: bool) -> np.ndarray:
+                conf_thresh: float, apply_grey: bool, lrf_dist: str) -> np.ndarray:
+        h, w = frame_bgr.shape[:2]
+        cx, cy = w // 2, h // 2
+
         if apply_grey:
             grey = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
             out  = cv2.cvtColor(grey, cv2.COLOR_GRAY2BGR)
         else:
             out  = frame_bgr.copy()
 
-        boxes = results[0].boxes
-        if boxes is None:
-            return out
+        font = cv2.FONT_HERSHEY_DUPLEX
 
-        for box in boxes:
-            conf = float(box.conf[0])
-            if conf < conf_thresh:
-                continue
-            cls_id   = int(box.cls[0])
-            cls_name = results[0].names[cls_id]
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            color    = _box_color(cls_id)
+        # ── Draw Fixed Boresight Crosshair at Frame Center ───────────────────
+        ch_color = (0, 255, 255)  # Cyan/Yellow BGR
+        arm = 22
+        gap = 5
+        
+        cv2.circle(out, (cx, cy), 16, ch_color, 1, cv2.LINE_AA)
+        cv2.circle(out, (cx, cy), 2, (0, 255, 255), -1)
 
-            cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+        cv2.line(out, (cx - arm, cy), (cx - gap, cy), ch_color, 2, cv2.LINE_AA)
+        cv2.line(out, (cx + gap, cy), (cx + arm, cy), ch_color, 2, cv2.LINE_AA)
+        cv2.line(out, (cx, cy - arm), (cx, cy - gap), ch_color, 2, cv2.LINE_AA)
+        cv2.line(out, (cx, cy + gap), (cx, cy + arm), ch_color, 2, cv2.LINE_AA)
 
-            label  = f"{cls_name}  {conf:.0%}"
-            font   = cv2.FONT_HERSHEY_DUPLEX
-            fs, th = 0.55, 1
-            (tw, lh), bl = cv2.getTextSize(label, font, fs, th)
-            lx, ly = x1, max(y1 - 6, lh + 6)
-            cv2.rectangle(out, (lx, ly - lh - bl - 4),
-                          (lx + tw + 8, ly + bl - 2), color, cv2.FILLED)
-            cv2.putText(out, label, (lx + 4, ly - 2),
-                        font, fs, (15, 15, 15), th, cv2.LINE_AA)
+        # ── Render LRF Distance HUD Overlay near Crosshair ────────────────────
+        hud_label = f"RANGE: {lrf_dist}"
+        fs, th = 0.5, 1
+        (tw, lh), bl = cv2.getTextSize(hud_label, font, fs, th)
+        hx, hy = cx + 24, cy + 6
+        cv2.rectangle(out, (hx - 4, hy - lh - 4), (hx + tw + 6, hy + bl + 2), (15, 15, 20), cv2.FILLED)
+        cv2.rectangle(out, (hx - 4, hy - lh - 4), (hx + tw + 6, hy + bl + 2), ch_color, 1, cv2.LINE_AA)
+        cv2.putText(out, hud_label, (hx, hy), font, fs, (0, 255, 255), th, cv2.LINE_AA)
+
+        # ── Render Detected Objects & Crosshair Alignment ─────────────────────
+        boxes = results[0].boxes if results else None
+        if boxes is not None:
+            for box in boxes:
+                conf = float(box.conf[0])
+                if conf < conf_thresh:
+                    continue
+                cls_id   = int(box.cls[0])
+                cls_name = results[0].names[cls_id]
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+
+                # Check if this object box covers the boresight center crosshair
+                is_targeted = (x1 <= cx <= x2) and (y1 <= cy <= y2)
+
+                if is_targeted:
+                    color = (0, 255, 255)  # Bright cyan highlight
+                    thick = 3
+                    label = f"🎯 TARGET: {cls_name} {conf:.0%} [{lrf_dist}]"
+                else:
+                    color = _box_color(cls_id)
+                    thick = 2
+                    label = f"{cls_name}  {conf:.0%}"
+
+                cv2.rectangle(out, (x1, y1), (x2, y2), color, thick)
+
+                (tw, lh), bl = cv2.getTextSize(label, font, fs, th)
+                lx, ly = x1, max(y1 - 6, lh + 6)
+                cv2.rectangle(out, (lx, ly - lh - bl - 4),
+                              (lx + tw + 8, ly + bl - 2), color, cv2.FILLED)
+                cv2.putText(out, label, (lx + 4, ly - 2),
+                            font, fs, (15, 15, 15), th, cv2.LINE_AA)
 
         return out
 
@@ -182,12 +194,13 @@ class DetectionWorker(threading.Thread):
         except queue.Full:
             pass
 
-    # ── run ───────────────────────────────────────────────────────────────────
-
     def run(self):
-        self._status_cb("Loading model…")
+        with self._lock:
+            model_path = self._model_path
+
+        self._status_cb(f"Loading model ({model_path})…")
         try:
-            model = YOLO(self.MODEL_PATH)
+            model = YOLO(model_path)
         except Exception as exc:
             self._status_cb(f"Model error: {exc}")
             return
@@ -198,12 +211,10 @@ class DetectionWorker(threading.Thread):
         if self._mode == MODE_IMAGE:
             self._run_image(model)
         else:
-            self._run_stream(model)   # camera and video share the same loop
+            self._run_stream(model)
 
         self._status_cb("Stopped")
         self._fps_cb(0.0)
-
-    # ── image mode ────────────────────────────────────────────────────────────
 
     def _run_image(self, model):
         frame = cv2.imread(self._source)
@@ -213,53 +224,46 @@ class DetectionWorker(threading.Thread):
 
         self._status_cb("Running — Image")
 
-        with self._lock:
-            conf = self._conf
-            grey = self._greyscale
-            self._rerender = False
-
-        # Run inference ONCE at high resolution
-        results = model(frame, imgsz=640, verbose=False)
-        annotated = self._render(frame, results, conf, grey)
-        self._push(annotated)
-
-        # Stay alive; re-render whenever slider/toggle changes
         while self.running:
             with self._lock:
-                rerender = self._rerender
-                if rerender:
-                    conf           = self._conf
-                    grey           = self._greyscale
-                    self._rerender = False
+                conf = self._conf
+                grey = self._greyscale
+                lrf_dist = self._lrf_distance_str
+                reload_mod = self._reload_model
+                path = self._model_path
+                self._rerender = False
 
-            if rerender:
-                annotated = self._render(frame, results, conf, grey)
-                self._push(annotated)
+            if reload_mod:
+                with self._lock:
+                    self._reload_model = False
+                self._status_cb(f"Reloading model ({path})…")
+                try:
+                    model = YOLO(path)
+                    self._status_cb(f"Running — Image ({path})")
+                except Exception as exc:
+                    self._status_cb(f"Model reload error: {exc}")
 
-            time.sleep(0.03)    # ~33 Hz check loop — no CPU burn
-
-    # ── camera + video-file mode ──────────────────────────────────────────────
+            results = model(frame, imgsz=640, verbose=False)
+            annotated = self._render(frame, results, conf, grey, lrf_dist)
+            self._push(annotated)
+            time.sleep(0.05)
 
     def _run_stream(self, model):
-        """
-        Decouples capture from inference:
-          CaptureThread fills a 1-slot raw-frame queue at full camera speed.
-          This inference loop grabs the latest frame, runs YOLO, pushes result.
-          Because the capture queue always holds only the freshest frame, the
-          inference loop never processes a stale frame — lag eliminated.
-        """
         label = "Camera" if self._mode == MODE_CAMERA else "Video"
-        src   = 0 if self._mode == MODE_CAMERA else self._source
+        if self._mode == MODE_CAMERA:
+            try:
+                src = int(self._source) if self._source is not None else 0
+            except (ValueError, TypeError):
+                src = 0
+        else:
+            src = self._source
 
-        # yolo26s at 640 is ~43% faster than yolo11n on CPU
-        # while maintaining better small-object accuracy
         INFER_SZ = 640
 
-        raw_slot      = queue.Queue(maxsize=1)     # capture → inference
-        cap_thread    = _CaptureThread(src, raw_slot)
+        raw_slot   = queue.Queue(maxsize=1)
+        cap_thread = _CaptureThread(src, raw_slot)
         cap_thread.start()
 
-        # Wait up to 2 s for the first frame to confirm camera opened
         try:
             _ = raw_slot.get(timeout=3.0)
             raw_slot.put_nowait(_)
@@ -272,8 +276,6 @@ class DetectionWorker(threading.Thread):
 
         fps_count = 0
         t_start   = time.perf_counter()
-
-        # Cache for dynamic conf: keep last results + raw frame
         last_results = None
         last_frame   = None
 
@@ -281,18 +283,29 @@ class DetectionWorker(threading.Thread):
             with self._lock:
                 if not self._running:
                     break
-                conf      = self._conf
-                grey      = self._greyscale
-                rerender  = self._rerender
+                conf       = self._conf
+                grey       = self._greyscale
+                lrf_dist   = self._lrf_distance_str
+                rerender   = self._rerender
+                reload_mod = self._reload_model
+                path       = self._model_path
                 if rerender:
                     self._rerender = False
 
-            # Re-render from cache if only slider/toggle changed
+            if reload_mod:
+                with self._lock:
+                    self._reload_model = False
+                self._status_cb(f"Reloading model ({path})…")
+                try:
+                    model = YOLO(path)
+                    self._status_cb(f"Running — {label} ({path})")
+                except Exception as exc:
+                    self._status_cb(f"Model reload error: {exc}")
+
             if rerender and last_results is not None:
-                annotated = self._render(last_frame, last_results, conf, grey)
+                annotated = self._render(last_frame, last_results, conf, grey, lrf_dist)
                 self._push(annotated)
 
-            # Grab the latest raw frame (non-blocking)
             try:
                 frame = raw_slot.get_nowait()
             except queue.Empty:
@@ -300,12 +313,10 @@ class DetectionWorker(threading.Thread):
                 continue
 
             last_frame = frame
-
-            # Run inference
             results      = model(frame, imgsz=INFER_SZ, verbose=False)
             last_results = results
 
-            annotated = self._render(frame, results, conf, grey)
+            annotated = self._render(frame, results, conf, grey, lrf_dist)
             self._push(annotated)
 
             fps_count += 1
